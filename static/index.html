@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Proctoring - Live Speaker Detection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5rem;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #94a3b8;
+            margin-bottom: 40px;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .session-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .session-id {
+            font-family: monospace;
+            background: rgba(0, 212, 255, 0.1);
+            padding: 8px 16px;
+            border-radius: 8px;
+            color: #00d4ff;
+        }
+
+        .status-badge {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .status-inactive {
+            background: rgba(255, 255, 255, 0.1);
+            color: #94a3b8;
+        }
+
+        .status-listening {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+            animation: pulse 2s infinite;
+        }
+
+        .status-processing {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+        }
+
+        .status-success {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+        }
+
+        .status-anomaly {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            animation: alert 0.5s ease-in-out 3;
+        }
+
+        .status-whisper {
+            background: rgba(168, 85, 247, 0.2);
+            color: #a855f7;
+        }
+
+        .status-overlap {
+            background: rgba(249, 115, 22, 0.2);
+            color: #f97316;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+        }
+
+        @keyframes alert {
+
+            0%,
+            100% {
+                transform: scale(1);
+            }
+
+            50% {
+                transform: scale(1.05);
+            }
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin: 30px 0;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #7c3aed, #2563eb);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(124, 58, 237, 0.3);
+        }
+
+        .btn-live {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+            color: white;
+        }
+
+        .btn-live:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(34, 197, 94, 0.3);
+        }
+
+        .btn-stop {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            color: white;
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #dc2626, #991b1b);
+            color: white;
+        }
+
+        .visualizer {
+            height: 120px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            margin: 20px 0;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .visualizer canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        .live-indicator {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            display: none;
+            align-items: center;
+            gap: 8px;
+            color: #22c55e;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .live-indicator.active {
+            display: flex;
+        }
+
+        .live-dot {
+            width: 10px;
+            height: 10px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: pulse 1s infinite;
+        }
+
+        .results {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .result-item {
+            padding: 12px 15px;
+            border-radius: 12px;
+            margin-bottom: 8px;
+        }
+
+        .result-success {
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .result-anomaly {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .result-info {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .result-whisper {
+            background: rgba(168, 85, 247, 0.1);
+            border: 1px solid rgba(168, 85, 247, 0.3);
+        }
+
+        .result-overlap {
+            background: rgba(249, 115, 22, 0.1);
+            border: 1px solid rgba(249, 115, 22, 0.3);
+        }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+
+        .result-title {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+
+        .result-similarity {
+            font-size: 1.2rem;
+            font-weight: 700;
+        }
+
+        .result-message {
+            color: #cbd5e1;
+            font-size: 0.9rem;
+        }
+
+        .result-badges {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+        }
+
+        .badge {
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+
+        .badge-foreign {
+            background: rgba(239, 68, 68, 0.3);
+            color: #ef4444;
+        }
+
+        .badge-whisper {
+            background: rgba(168, 85, 247, 0.3);
+            color: #a855f7;
+        }
+
+        .badge-overlap {
+            background: rgba(249, 115, 22, 0.3);
+            color: #f97316;
+        }
+
+        .badge-verified {
+            background: rgba(34, 197, 94, 0.3);
+            color: #22c55e;
+        }
+
+        .badge-registered {
+            background: rgba(59, 130, 246, 0.3);
+            color: #3b82f6;
+        }
+
+        .result-meta {
+            font-size: 0.75rem;
+            color: #64748b;
+            margin-top: 5px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-top: 20px;
+        }
+
+        @media (max-width: 600px) {
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        .stat-box {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .stat-value.blue {
+            color: #00d4ff;
+        }
+
+        .stat-value.red {
+            color: #ef4444;
+        }
+
+        .stat-value.orange {
+            color: #f97316;
+        }
+
+        .stat-value.purple {
+            color: #a855f7;
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            color: #94a3b8;
+            margin-top: 3px;
+        }
+
+        .mode-toggle {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+
+        .mode-btn {
+            padding: 10px 20px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            background: transparent;
+            color: #94a3b8;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .mode-btn.active {
+            border-color: #00d4ff;
+            color: #00d4ff;
+            background: rgba(0, 212, 255, 0.1);
+        }
+
+        .mode-btn:hover {
+            border-color: #00d4ff;
+        }
+
+        .detection-info {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        @media (max-width: 600px) {
+            .detection-info {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .detection-type {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .detection-type .icon {
+            font-size: 1.3rem;
+        }
+
+        .detection-type .label {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            margin-top: 3px;
+        }
+
+        .interval-control {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin: 15px 0;
+        }
+
+        .interval-control label {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+
+        .interval-control select {
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: rgba(0, 0, 0, 0.3);
+            color: white;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>🎙️ Live Audio Proctoring</h1>
+        <p class="subtitle">Real-time Speaker Detection for Anti-Cheat</p>
+
+        <div class="detection-info">
+            <div class="detection-type">
+                <div class="icon">👤</div>
+                <div class="label">Foreign Speaker</div>
+            </div>
+            <div class="detection-type">
+                <div class="icon">👥</div>
+                <div class="label">Overlapping Speech</div>
+            </div>
+            <div class="detection-type">
+                <div class="icon">🤫</div>
+                <div class="label">Whisper Detection</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="session-info">
+                <div><span>Session: </span><span class="session-id" id="sessionId">Not started</span></div>
+                <span class="status-badge status-inactive" id="statusBadge">Inactive</span>
+            </div>
+
+            <div class="visualizer">
+                <canvas id="visualizer"></canvas>
+                <div class="live-indicator" id="liveIndicator">
+                    <div class="live-dot"></div>LIVE
+                </div>
+            </div>
+
+            <div class="interval-control">
+                <label>Analysis interval:</label>
+                <select id="intervalSelect">
+                    <option value="3000">3 seconds</option>
+                    <option value="5000" selected>5 seconds</option>
+                    <option value="10000">10 seconds</option>
+                </select>
+            </div>
+
+            <div class="controls">
+                <button class="btn-primary" id="startSessionBtn" onclick="startSession()">▶️ Start Session</button>
+                <button class="btn-live" id="liveBtn" onclick="toggleLiveMode()" disabled>🔴 Start Live
+                    Detection</button>
+                <button class="btn-danger" id="endSessionBtn" onclick="endSession()" disabled>⏹️ End Session</button>
+            </div>
+
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-value blue" id="totalRecordings">0</div>
+                    <div class="stat-label">Analyzed</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value red" id="foreignCount">0</div>
+                    <div class="stat-label">Foreign</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value orange" id="overlapCount">0</div>
+                    <div class="stat-label">Overlap</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value purple" id="whisperCount">0</div>
+                    <div class="stat-label">Whisper</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-bottom: 15px;">📊 Live Analysis Results</h3>
+            <div class="results" id="results">
+                <p style="color: #94a3b8; text-align: center;">Start a session and enable live detection to see results
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000/api/v1';
+        let sessionId = null, audioContext = null, analyser = null, animationId = null;
+        let audioStream = null, mediaRecorder = null, audioChunks = [];
+        let isLiveMode = false, liveInterval = null;
+        let stats = { total: 0, foreign: 0, overlap: 0, whisper: 0 };
+
+        const sessionIdEl = document.getElementById('sessionId');
+        const statusBadge = document.getElementById('statusBadge');
+        const startSessionBtn = document.getElementById('startSessionBtn');
+        const liveBtn = document.getElementById('liveBtn');
+        const endSessionBtn = document.getElementById('endSessionBtn');
+        const resultsEl = document.getElementById('results');
+        const liveIndicator = document.getElementById('liveIndicator');
+        const intervalSelect = document.getElementById('intervalSelect');
+        const canvas = document.getElementById('visualizer');
+        const canvasCtx = canvas.getContext('2d');
+
+        async function startSession() {
+            try {
+                const response = await fetch(`${API_BASE}/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                if (!response.ok) throw new Error('Failed to create session');
+                const data = await response.json();
+                sessionId = data.session_id;
+                sessionIdEl.textContent = sessionId.substring(0, 8) + '...';
+                updateStatus('Ready - Click "Start Live Detection"', 'status-success');
+                startSessionBtn.disabled = true;
+                liveBtn.disabled = false;
+                endSessionBtn.disabled = false;
+                resultsEl.innerHTML = '';
+                addResult('info', '🎉 Session Started', 'Click "Start Live Detection" to begin continuous monitoring', null, []);
+                await setupAudio();
+            } catch (error) {
+                console.error('Error:', error);
+                addResult('anomaly', '❌ Error', error.message, null, []);
+            }
+        }
+
+        async function setupAudio() {
+            try {
+                audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+                });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                analyser = audioContext.createAnalyser();
+                const source = audioContext.createMediaStreamSource(audioStream);
+                source.connect(analyser);
+                analyser.fftSize = 256;
+
+                // Setup MediaRecorder
+                const mimeTypes = ['audio/webm;codecs=pcm', 'audio/webm', 'audio/ogg'];
+                let selectedMime = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || '';
+                mediaRecorder = new MediaRecorder(audioStream, selectedMime ? { mimeType: selectedMime } : {});
+                console.log('Using MIME:', mediaRecorder.mimeType);
+
+                mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
+                mediaRecorder.onstop = async () => {
+                    if (audioChunks.length > 0) {
+                        const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                        audioChunks = [];
+                        await analyzeAudio(blob);
+                    }
+                };
+
+                visualize();
+            } catch (error) {
+                console.error('Microphone error:', error);
+                addResult('anomaly', '❌ Microphone Error', 'Please allow microphone access and reload', null, []);
+            }
+        }
+
+        function toggleLiveMode() {
+            if (isLiveMode) {
+                stopLiveMode();
+            } else {
+                startLiveMode();
+            }
+        }
+
+        function startLiveMode() {
+            if (!mediaRecorder) return;
+            isLiveMode = true;
+            liveBtn.innerHTML = '⏹️ Stop Live Detection';
+            liveBtn.classList.remove('btn-live');
+            liveBtn.classList.add('btn-stop');
+            liveIndicator.classList.add('active');
+            updateStatus('🔴 LIVE - Listening...', 'status-listening');
+
+            // Start recording and analyzing at intervals
+            recordAndAnalyze();
+            const interval = parseInt(intervalSelect.value);
+            liveInterval = setInterval(recordAndAnalyze, interval);
+        }
+
+        function stopLiveMode() {
+            isLiveMode = false;
+            if (liveInterval) {
+                clearInterval(liveInterval);
+                liveInterval = null;
+            }
+            if (mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+            }
+            liveBtn.innerHTML = '🔴 Start Live Detection';
+            liveBtn.classList.remove('btn-stop');
+            liveBtn.classList.add('btn-live');
+            liveIndicator.classList.remove('active');
+            updateStatus('Paused', 'status-success');
+        }
+
+        function recordAndAnalyze() {
+            if (!isLiveMode || !mediaRecorder) return;
+
+            // If already recording, stop and process
+            if (mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+            }
+
+            // Wait a bit then start new recording
+            setTimeout(() => {
+                if (isLiveMode && mediaRecorder.state !== 'recording') {
+                    audioChunks = [];
+                    mediaRecorder.start();
+                    updateStatus('🔴 LIVE - Recording...', 'status-listening');
+                }
+            }, 100);
+        }
+
+        function visualize() {
+            if (!analyser) return;
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+
+            function draw() {
+                animationId = requestAnimationFrame(draw);
+                analyser.getByteFrequencyData(dataArray);
+                canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+                const barWidth = (canvas.width / bufferLength) * 2.5;
+                let x = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    const barHeight = (dataArray[i] / 255) * canvas.height;
+                    const gradient = canvasCtx.createLinearGradient(0, canvas.height - barHeight, 0, canvas.height);
+                    gradient.addColorStop(0, isLiveMode ? '#22c55e' : '#00d4ff');
+                    gradient.addColorStop(1, isLiveMode ? '#16a34a' : '#7c3aed');
+                    canvasCtx.fillStyle = gradient;
+                    canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                    x += barWidth + 1;
+                }
+            }
+            draw();
+        }
+
+        async function analyzeAudio(audioBlob) {
+            try {
+                updateStatus('🔴 LIVE - Analyzing...', 'status-processing');
+                const formData = new FormData();
+                const ext = mediaRecorder.mimeType.includes('webm') ? 'webm' : 'ogg';
+                formData.append('audio', audioBlob, `recording.${ext}`);
+
+                const response = await fetch(`${API_BASE}/session/${sessionId}/analyze`, { method: 'POST', body: formData });
+                if (!response.ok) throw new Error('Analysis failed');
+                const result = await response.json();
+
+                stats.total++;
+                if (result.anomalies_detected) {
+                    result.anomalies_detected.forEach(a => {
+                        if (a.includes('foreign_speaker')) stats.foreign++;
+                        if (a.includes('overlapping_speech')) stats.overlap++;
+                        if (a.includes('whisper')) stats.whisper++;
+                    });
+                }
+                updateStats();
+
+                const badges = [];
+                if (result.is_first_audio) badges.push({ text: 'REGISTERED', class: 'badge-registered' });
+                else if (result.is_main_speaker && !result.is_anomaly) badges.push({ text: '✓ VERIFIED', class: 'badge-verified' });
+                if (result.anomalies_detected?.length > 0) {
+                    result.anomalies_detected.forEach(a => {
+                        if (a.includes('foreign_speaker')) badges.push({ text: '👤 FOREIGN', class: 'badge-foreign' });
+                        if (a.includes('overlapping_speech')) badges.push({ text: '👥 OVERLAP', class: 'badge-overlap' });
+                        if (a.includes('whisper')) badges.push({ text: '🤫 WHISPER', class: 'badge-whisper' });
+                    });
+                }
+
+                let resultType = 'success', statusClass = 'status-listening';
+                if (result.is_first_audio) resultType = 'info';
+                else if (result.is_anomaly) {
+                    resultType = 'anomaly'; statusClass = 'status-anomaly';
+                    if (result.has_overlapping_speech && !result.anomalies_detected?.some(a => a.includes('foreign'))) {
+                        resultType = 'overlap'; statusClass = 'status-overlap';
+                    } else if (result.is_whisper && !result.anomalies_detected?.some(a => a.includes('foreign'))) {
+                        resultType = 'whisper'; statusClass = 'status-whisper';
+                    }
+                }
+
+                if (isLiveMode) {
+                    updateStatus(result.is_anomaly ? '⚠️ ANOMALY DETECTED!' : '🔴 LIVE - OK', statusClass);
+                }
+
+                const title = result.is_first_audio ? '✅ Main Speaker Registered' : result.is_anomaly ? '⚠️ Anomaly' : '✅ Verified';
+                addResult(resultType, title, result.message, result.similarity_score, badges);
+            } catch (error) {
+                console.error('Error:', error);
+                if (isLiveMode) updateStatus('🔴 LIVE - Error', 'status-anomaly');
+            }
+        }
+
+        function addResult(type, title, message, similarity, badges = []) {
+            if (resultsEl.querySelector('p')) resultsEl.innerHTML = '';
+            const resultClass = { 'success': 'result-success', 'anomaly': 'result-anomaly', 'info': 'result-info', 'whisper': 'result-whisper', 'overlap': 'result-overlap' }[type] || 'result-info';
+            const simColor = similarity >= 0.75 ? '#22c55e' : '#ef4444';
+            const simHtml = similarity !== null ? `<div class="result-similarity" style="color: ${simColor}">${(similarity * 100).toFixed(0)}%</div>` : '';
+            const badgesHtml = badges.map(b => `<span class="badge ${b.class}">${b.text}</span>`).join('');
+            resultsEl.insertAdjacentHTML('afterbegin', `
+                <div class="result-item ${resultClass}">
+                    <div class="result-header"><div class="result-title">${title}</div>${simHtml}</div>
+                    <div class="result-message">${message}</div>
+                    ${badgesHtml ? `<div class="result-badges">${badgesHtml}</div>` : ''}
+                    <div class="result-meta">${new Date().toLocaleTimeString()}</div>
+                </div>
+            `);
+            // Keep only last 20 results
+            while (resultsEl.children.length > 20) resultsEl.removeChild(resultsEl.lastChild);
+        }
+
+        function updateStatus(text, className) { statusBadge.textContent = text; statusBadge.className = 'status-badge ' + className; }
+        function updateStats() {
+            document.getElementById('totalRecordings').textContent = stats.total;
+            document.getElementById('foreignCount').textContent = stats.foreign;
+            document.getElementById('overlapCount').textContent = stats.overlap;
+            document.getElementById('whisperCount').textContent = stats.whisper;
+        }
+
+        async function endSession() {
+            stopLiveMode();
+            if (!sessionId) return;
+            try {
+                await fetch(`${API_BASE}/session/${sessionId}`, { method: 'DELETE' });
+                if (animationId) cancelAnimationFrame(animationId);
+                if (audioContext) audioContext.close();
+                if (audioStream) audioStream.getTracks().forEach(t => t.stop());
+                sessionId = null;
+                sessionIdEl.textContent = 'Not started';
+                updateStatus('Inactive', 'status-inactive');
+                startSessionBtn.disabled = false;
+                liveBtn.disabled = true;
+                endSessionBtn.disabled = true;
+                stats = { total: 0, foreign: 0, overlap: 0, whisper: 0 };
+                updateStats();
+                addResult('info', '📋 Session Ended', 'All data cleared', null, []);
+            } catch (error) { console.error('Error:', error); }
+        }
+    </script>
+</body>
+
+</html>
