@@ -13,6 +13,9 @@ from app.config import MAX_EMBEDDING_SAMPLES, SESSION_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
+# Registration phase configuration
+REGISTRATION_TARGET_DURATION: float = 5.0  # 5 seconds of speech needed
+
 
 @dataclass
 class SessionData:
@@ -26,6 +29,12 @@ class SessionData:
     anomaly_count: int = 0
     total_audio_chunks: int = 0
     is_main_speaker_set: bool = False
+    
+    # Registration phase fields
+    in_registration_phase: bool = False
+    registration_speech_duration: float = 0.0
+    registration_audio_chunks: List[np.ndarray] = field(default_factory=list)
+    registration_target_duration: float = REGISTRATION_TARGET_DURATION
 
     def to_dict(self) -> dict:
         """Convert session data to dictionary for API responses."""
@@ -37,6 +46,8 @@ class SessionData:
             "anomaly_count": self.anomaly_count,
             "total_audio_chunks": self.total_audio_chunks,
             "embedding_samples_count": len(self.embedding_samples),
+            "in_registration_phase": self.in_registration_phase,
+            "registration_progress": min(1.0, self.registration_speech_duration / self.registration_target_duration) if self.in_registration_phase else 0.0,
         }
 
 
@@ -241,6 +252,187 @@ class SessionManager:
         """
         with self._lock:
             return [session.to_dict() for session in self.sessions.values()]
+
+    # ============== Registration Phase Methods ==============
+
+    def start_registration(self, session_id: str) -> bool:
+        """
+        Start the registration phase for collecting speaker audio.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            True if registration started successfully, False otherwise
+        """
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                logger.error(f"Session {session_id} not found")
+                return False
+
+            if session.is_main_speaker_set:
+                logger.warning(f"Session {session_id} already has main speaker set")
+                return False
+
+            session.in_registration_phase = True
+            session.registration_speech_duration = 0.0
+            session.registration_audio_chunks = []
+            session.last_activity = datetime.now()
+
+            logger.info(f"Registration phase started for session {session_id}")
+            return True
+
+    def add_registration_audio(
+        self, 
+        session_id: str, 
+        audio_chunk: np.ndarray, 
+        speech_duration: float
+    ) -> dict:
+        """
+        Add audio chunk to registration buffer.
+
+        Args:
+            session_id: Session identifier
+            audio_chunk: Audio data containing speech
+            speech_duration: Duration of speech in the chunk (seconds)
+
+        Returns:
+            Dict with registration progress info
+        """
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return {"error": "Session not found", "complete": False}
+
+            if not session.in_registration_phase:
+                return {"error": "Not in registration phase", "complete": False}
+
+            # Add audio chunk
+            session.registration_audio_chunks.append(audio_chunk.copy())
+            session.registration_speech_duration += speech_duration
+            session.last_activity = datetime.now()
+
+            progress = min(1.0, session.registration_speech_duration / session.registration_target_duration)
+            is_complete = session.registration_speech_duration >= session.registration_target_duration
+
+            logger.info(
+                f"Registration progress for session {session_id}: "
+                f"{session.registration_speech_duration:.2f}s / {session.registration_target_duration:.2f}s "
+                f"({progress:.0%})"
+            )
+
+            return {
+                "progress": progress,
+                "speech_collected": session.registration_speech_duration,
+                "target_duration": session.registration_target_duration,
+                "complete": is_complete,
+                "chunks_collected": len(session.registration_audio_chunks)
+            }
+
+    def get_registration_audio(self, session_id: str) -> Optional[np.ndarray]:
+        """
+        Get the combined registration audio for embedding extraction.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            Combined audio array or None if not available
+        """
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None or not session.registration_audio_chunks:
+                return None
+
+            # Concatenate all audio chunks
+            combined = np.concatenate(session.registration_audio_chunks)
+            return combined
+
+    def complete_registration(self, session_id: str, embedding: np.ndarray) -> bool:
+        """
+        Complete registration phase and set the main speaker embedding.
+
+        Args:
+            session_id: Session identifier
+            embedding: Speaker embedding extracted from registration audio
+
+        Returns:
+            True if successful, False otherwise
+        """
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                logger.error(f"Session {session_id} not found")
+                return False
+
+            session.main_speaker_embedding = embedding.copy()
+            session.embedding_samples = [embedding.copy()]
+            session.is_main_speaker_set = True
+            session.in_registration_phase = False
+            session.registration_audio_chunks = []  # Clear to free memory
+            session.last_activity = datetime.now()
+
+            logger.info(
+                f"Registration completed for session {session_id} "
+                f"(collected {session.registration_speech_duration:.2f}s of speech)"
+            )
+            return True
+
+    def cancel_registration(self, session_id: str) -> bool:
+        """
+        Cancel the registration phase and clear collected audio.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            True if cancelled, False if session not found
+        """
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return False
+
+            session.in_registration_phase = False
+            session.registration_speech_duration = 0.0
+            session.registration_audio_chunks = []
+            session.last_activity = datetime.now()
+
+            logger.info(f"Registration cancelled for session {session_id}")
+            return True
+
+    def get_registration_progress(self, session_id: str) -> Optional[dict]:
+        """
+        Get the current registration progress.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            Dict with progress info or None if not in registration
+        """
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return None
+
+            if not session.in_registration_phase:
+                return {
+                    "in_registration": False,
+                    "progress": 0.0,
+                    "speech_collected": 0.0,
+                    "target_duration": session.registration_target_duration,
+                }
+
+            progress = min(1.0, session.registration_speech_duration / session.registration_target_duration)
+            return {
+                "in_registration": True,
+                "progress": progress,
+                "speech_collected": session.registration_speech_duration,
+                "target_duration": session.registration_target_duration,
+                "chunks_collected": len(session.registration_audio_chunks),
+            }
 
     def cleanup_expired_sessions(self) -> int:
         """

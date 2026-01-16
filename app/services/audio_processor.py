@@ -145,8 +145,24 @@ class AudioProcessor:
         )
 
     def _detect_speech_segments(self, audio: np.ndarray, rms: np.ndarray, hop_length: int) -> List[Tuple[float, float]]:
-        """Detect speech segments based on energy levels."""
-        threshold = np.percentile(rms, 30)
+        """
+        Detect speech segments based on energy levels.
+        
+        Uses both absolute and relative thresholds to filter out noise:
+        - Absolute: frame must have min RMS energy (filters noise)
+        - Relative: frame must be above 30th percentile of signal
+        """
+        # Absolute minimum energy threshold to filter out noise
+        # This value needs to be above typical background noise
+        # Lowered to 0.03 to catch legitimate quiet speech while filtering noise
+        MIN_SPEECH_ENERGY = 0.045  # Lowered from 0.05
+        
+        # Relative threshold based on signal percentile 
+        relative_threshold = np.percentile(rms, 40)  # Lowered from 40 to 35
+        
+        # Use the higher of the two thresholds
+        threshold = max(MIN_SPEECH_ENERGY, relative_threshold)
+        
         speech_frames = rms > threshold
         
         segments = []
@@ -160,14 +176,15 @@ class AudioProcessor:
             elif not is_speech and in_speech:
                 start_time = start_frame * hop_length / self.sample_rate
                 end_time = i * hop_length / self.sample_rate
-                if end_time - start_time >= 0.1:
+                # Require minimum segment duration of 0.3s
+                if end_time - start_time >= 0.3:
                     segments.append((start_time, end_time))
                 in_speech = False
         
         if in_speech:
             start_time = start_frame * hop_length / self.sample_rate
             end_time = len(speech_frames) * hop_length / self.sample_rate
-            if end_time - start_time >= 0.1:
+            if end_time - start_time >= 0.3:
                 segments.append((start_time, end_time))
         
         return segments

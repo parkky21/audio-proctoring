@@ -32,6 +32,14 @@ class SessionStatusResponse(BaseModel):
     anomaly_count: int
     total_audio_chunks: int
     embedding_samples_count: int
+    in_registration_phase: bool = Field(
+        False,
+        description="Whether the session is currently in speaker registration phase"
+    )
+    registration_progress: float = Field(
+        0.0,
+        description="Progress of speaker registration (0-1)"
+    )
 
 
 class DeleteSessionResponse(BaseModel):
@@ -39,6 +47,17 @@ class DeleteSessionResponse(BaseModel):
     session_id: str
     message: str
     deleted: bool
+
+
+class StartRegistrationResponse(BaseModel):
+    """Response after starting speaker registration."""
+    session_id: str
+    success: bool
+    message: str
+    target_duration: float = Field(
+        5.0,
+        description="Target speech duration to collect in seconds"
+    )
 
 
 # ============== Analysis Schemas ==============
@@ -56,7 +75,7 @@ class AnalyzeAudioResponse(BaseModel):
         description="Whether an anomaly was detected"
     )
     anomaly_type: str = Field(
-        description="Type of anomaly: none, foreign_speaker, overlapping_speech, whisper_detected, multiple_anomalies, no_speech, audio_too_short, audio_too_long, processing_error"
+        description="Type of anomaly: none, foreign_speaker, overlapping_speech, whisper_detected, multiple_anomalies, no_speech, audio_too_short, audio_too_long, processing_error, registration_in_progress"
     )
     message: str = Field(
         description="Human-readable message about the analysis result"
@@ -88,6 +107,27 @@ class AnalyzeAudioResponse(BaseModel):
     anomalies_detected: List[str] = Field(
         default_factory=list,
         description="List of all anomalies detected in the audio"
+    )
+    # Registration phase fields
+    in_registration: Optional[bool] = Field(
+        None,
+        description="Whether currently in registration phase (only present during registration)"
+    )
+    registration_progress: Optional[float] = Field(
+        None,
+        description="Progress of speaker registration 0-1 (only present during registration)"
+    )
+    registration_speech_collected: Optional[float] = Field(
+        None,
+        description="Seconds of speech collected (only present during registration)"
+    )
+    registration_target_duration: Optional[float] = Field(
+        None,
+        description="Target speech duration to collect (only present during registration)"
+    )
+    registration_complete: Optional[bool] = Field(
+        None,
+        description="Whether registration just completed (only present during registration)"
     )
 
 

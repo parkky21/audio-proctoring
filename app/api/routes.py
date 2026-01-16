@@ -129,6 +129,63 @@ async def list_all_sessions():
     )
 
 
+# ============== Registration ==============
+
+@router.post(
+    "/session/{session_id}/start-registration",
+    tags=["Registration"],
+    summary="Start speaker registration phase"
+)
+async def start_registration(session_id: str):
+    """
+    Start the speaker registration phase.
+    
+    This begins collecting speech audio to create a speaker reference.
+    - Audio chunks are accumulated until 5 seconds of speech is collected
+    - Only actual speech (not silence) counts toward the 5 seconds
+    - Call /analyze endpoint after this to submit audio chunks
+    
+    The registration will complete automatically when enough speech is collected.
+    """
+    from app.api.schemas import StartRegistrationResponse
+    from app.services.session_manager import REGISTRATION_TARGET_DURATION
+    
+    session_manager = get_session_manager()
+    session = session_manager.get_session(session_id)
+    
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found"
+        )
+    
+    if session.is_main_speaker_set:
+        return StartRegistrationResponse(
+            session_id=session_id,
+            success=False,
+            message="Main speaker is already registered. Use a new session to register a different speaker.",
+            target_duration=REGISTRATION_TARGET_DURATION
+        )
+    
+    success = session_manager.start_registration(session_id)
+    
+    if success:
+        logger.info(f"Registration started for session {session_id}")
+        return StartRegistrationResponse(
+            session_id=session_id,
+            success=True,
+            message=f"Registration started. Speak clearly to register your voice ({REGISTRATION_TARGET_DURATION:.0f}s of speech needed).",
+            target_duration=REGISTRATION_TARGET_DURATION
+        )
+    else:
+        return StartRegistrationResponse(
+            session_id=session_id,
+            success=False,
+            message="Failed to start registration",
+            target_duration=REGISTRATION_TARGET_DURATION
+        )
+
+
 # ============== Audio Analysis ==============
 
 @router.post(

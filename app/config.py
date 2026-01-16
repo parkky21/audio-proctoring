@@ -6,7 +6,7 @@ from typing import Final
 # Speaker similarity threshold (cosine similarity)
 # Higher = stricter matching, Lower = more lenient
 # Typical range: 0.70 - 0.85
-SIMILARITY_THRESHOLD: Final[float] = 0.75
+SIMILARITY_THRESHOLD: Final[float] = 0.80  # Increased from 0.75 for stricter detection
 
 # Minimum audio duration in seconds for reliable embedding extraction
 # Resemblyzer works best with 5-30 seconds of speech

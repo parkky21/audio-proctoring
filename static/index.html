@@ -495,8 +495,8 @@
             <div class="interval-control">
                 <label>Analysis interval:</label>
                 <select id="intervalSelect">
-                    <option value="3000">3 seconds</option>
-                    <option value="5000" selected>5 seconds</option>
+                    <option value="3000" selected>3 seconds</option>
+                    <option value="5000">5 seconds</option>
                     <option value="10000">10 seconds</option>
                 </select>
             </div>
@@ -542,6 +542,7 @@
         let sessionId = null, audioContext = null, analyser = null, animationId = null;
         let audioStream = null, mediaRecorder = null, audioChunks = [];
         let isLiveMode = false, liveInterval = null;
+        let isRegistering = false, registrationComplete = false;
         let stats = { total: 0, foreign: 0, overlap: 0, whisper: 0 };
 
         const sessionIdEl = document.getElementById('sessionId');
@@ -616,14 +617,36 @@
             }
         }
 
-        function startLiveMode() {
+        async function startLiveMode() {
             if (!mediaRecorder) return;
+
+            // If not registered yet, start registration phase
+            if (!registrationComplete) {
+                try {
+                    const regResponse = await fetch(`${API_BASE}/session/${sessionId}/start-registration`, { method: 'POST' });
+                    if (!regResponse.ok) throw new Error('Failed to start registration');
+                    const regData = await regResponse.json();
+
+                    if (!regData.success && regData.message.includes('already registered')) {
+                        // Speaker already registered, proceed to detection
+                        registrationComplete = true;
+                    } else {
+                        isRegistering = true;
+                        addResult('info', '🎙️ Registration Started', `Speak clearly to register your voice (${regData.target_duration}s of speech needed)`, null, []);
+                    }
+                } catch (error) {
+                    console.error('Registration start error:', error);
+                    addResult('anomaly', '❌ Error', 'Failed to start registration: ' + error.message, null, []);
+                    return;
+                }
+            }
+
             isLiveMode = true;
             liveBtn.innerHTML = '⏹️ Stop Live Detection';
             liveBtn.classList.remove('btn-live');
             liveBtn.classList.add('btn-stop');
             liveIndicator.classList.add('active');
-            updateStatus('🔴 LIVE - Listening...', 'status-listening');
+            updateStatus(isRegistering ? '🎙️ REGISTERING - Speak clearly...' : '🔴 LIVE - Listening...', isRegistering ? 'status-processing' : 'status-listening');
 
             // Start recording and analyzing at intervals
             recordAndAnalyze();
@@ -637,13 +660,14 @@
                 clearInterval(liveInterval);
                 liveInterval = null;
             }
-            if (mediaRecorder.state === 'recording') {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
                 mediaRecorder.stop();
             }
             liveBtn.innerHTML = '🔴 Start Live Detection';
             liveBtn.classList.remove('btn-stop');
             liveBtn.classList.add('btn-live');
             liveIndicator.classList.remove('active');
+            isRegistering = false;
             updateStatus('Paused', 'status-success');
         }
 
@@ -694,7 +718,7 @@
 
         async function analyzeAudio(audioBlob) {
             try {
-                updateStatus('🔴 LIVE - Analyzing...', 'status-processing');
+                updateStatus(isRegistering ? '🎙️ REGISTERING - Analyzing...' : '🔴 LIVE - Analyzing...', 'status-processing');
                 const formData = new FormData();
                 const ext = mediaRecorder.mimeType.includes('webm') ? 'webm' : 'ogg';
                 formData.append('audio', audioBlob, `recording.${ext}`);
@@ -702,6 +726,26 @@
                 const response = await fetch(`${API_BASE}/session/${sessionId}/analyze`, { method: 'POST', body: formData });
                 if (!response.ok) throw new Error('Analysis failed');
                 const result = await response.json();
+
+                // Handle registration phase
+                if (result.in_registration === true || result.anomaly_type === 'registration_in_progress') {
+                    const progress = result.registration_progress || 0;
+                    const collected = result.registration_speech_collected || 0;
+                    const target = result.registration_target_duration || 5;
+                    updateStatus(`🎙️ REGISTERING - ${Math.round(progress * 100)}% (${collected.toFixed(1)}s / ${target}s)`, 'status-processing');
+                    addResult('info', `🎙️ Registering ${Math.round(progress * 100)}%`, result.message, null, []);
+                    return;
+                }
+
+                // Handle registration completion
+                if (result.registration_complete === true || result.is_first_audio) {
+                    isRegistering = false;
+                    registrationComplete = true;
+                    updateStatus('✅ Registered! Switching to detection...', 'status-success');
+                    setTimeout(() => {
+                        if (isLiveMode) updateStatus('🔴 LIVE - Listening...', 'status-listening');
+                    }, 2000);
+                }
 
                 stats.total++;
                 if (result.anomalies_detected) {
@@ -714,7 +758,7 @@
                 updateStats();
 
                 const badges = [];
-                if (result.is_first_audio) badges.push({ text: 'REGISTERED', class: 'badge-registered' });
+                if (result.is_first_audio || result.registration_complete) badges.push({ text: 'REGISTERED', class: 'badge-registered' });
                 else if (result.is_main_speaker && !result.is_anomaly) badges.push({ text: '✓ VERIFIED', class: 'badge-verified' });
                 if (result.anomalies_detected?.length > 0) {
                     result.anomalies_detected.forEach(a => {
@@ -725,7 +769,7 @@
                 }
 
                 let resultType = 'success', statusClass = 'status-listening';
-                if (result.is_first_audio) resultType = 'info';
+                if (result.is_first_audio || result.registration_complete) resultType = 'info';
                 else if (result.is_anomaly) {
                     resultType = 'anomaly'; statusClass = 'status-anomaly';
                     if (result.has_overlapping_speech && !result.anomalies_detected?.some(a => a.includes('foreign'))) {
@@ -735,11 +779,11 @@
                     }
                 }
 
-                if (isLiveMode) {
+                if (isLiveMode && !result.is_first_audio && !result.registration_complete) {
                     updateStatus(result.is_anomaly ? '⚠️ ANOMALY DETECTED!' : '🔴 LIVE - OK', statusClass);
                 }
 
-                const title = result.is_first_audio ? '✅ Main Speaker Registered' : result.is_anomaly ? '⚠️ Anomaly' : '✅ Verified';
+                const title = (result.is_first_audio || result.registration_complete) ? '✅ Main Speaker Registered' : result.is_anomaly ? '⚠️ Anomaly' : '✅ Verified';
                 addResult(resultType, title, result.message, result.similarity_score, badges);
             } catch (error) {
                 console.error('Error:', error);
@@ -787,6 +831,8 @@
                 startSessionBtn.disabled = false;
                 liveBtn.disabled = true;
                 endSessionBtn.disabled = true;
+                isRegistering = false;
+                registrationComplete = false;
                 stats = { total: 0, foreign: 0, overlap: 0, whisper: 0 };
                 updateStats();
                 addResult('info', '📋 Session Ended', 'All data cleared', null, []);

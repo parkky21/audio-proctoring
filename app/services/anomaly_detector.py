@@ -26,6 +26,7 @@ class AnomalyType(str, Enum):
     AUDIO_TOO_SHORT = "audio_too_short"
     AUDIO_TOO_LONG = "audio_too_long"
     PROCESSING_ERROR = "processing_error"
+    REGISTRATION_IN_PROGRESS = "registration_in_progress"  # New: registration phase
 
 
 @dataclass
@@ -46,6 +47,12 @@ class AnalysisResult:
     has_overlapping_speech: bool = False
     overlap_confidence: float = 0.0
     anomalies_detected: List[str] = None
+    # Registration phase fields
+    in_registration: bool = False
+    registration_progress: float = 0.0
+    registration_speech_collected: float = 0.0
+    registration_target_duration: float = 5.0
+    registration_complete: bool = False
 
     def __post_init__(self):
         if self.anomalies_detected is None:
@@ -53,7 +60,7 @@ class AnalysisResult:
 
     def to_dict(self) -> dict:
         """Convert to dictionary for API response."""
-        return {
+        result = {
             "session_id": self.session_id,
             "is_main_speaker": self.is_main_speaker,
             "similarity_score": round(self.similarity_score, 4),
@@ -68,6 +75,16 @@ class AnalysisResult:
             "overlap_confidence": round(self.overlap_confidence, 4),
             "anomalies_detected": self.anomalies_detected,
         }
+        # Add registration fields when in registration phase
+        if self.in_registration or self.registration_complete:
+            result.update({
+                "in_registration": self.in_registration,
+                "registration_progress": round(self.registration_progress, 4),
+                "registration_speech_collected": round(self.registration_speech_collected, 2),
+                "registration_target_duration": self.registration_target_duration,
+                "registration_complete": self.registration_complete,
+            })
+        return result
 
 
 class AnomalyDetector:
@@ -147,6 +164,8 @@ class AnomalyDetector:
         - Foreign speakers (different voice from main speaker)
         - Overlapping speech (multiple people talking simultaneously)
         - Whispers (potential cheating indicator)
+        
+        Also handles registration phase for accumulating speaker audio.
         """
         # Get session
         session = self.session_manager.get_session(session_id)
@@ -194,15 +213,33 @@ class AnomalyDetector:
             # Perform comprehensive audio analysis
             audio_analysis = self.audio_processor.analyze_audio(audio)
             
-            # Check if speech was found
+            # Handle registration phase - accumulate speech for reference
+            if session.in_registration_phase:
+                return self._handle_registration_phase(
+                    session_id, audio, sample_rate, duration, audio_analysis
+                )
+            
+            # Check if speech was found (for non-registration mode)
             if not audio_analysis.has_speech:
+                # During normal detection, no speech is just skipped (not an anomaly)
+                if session.is_main_speaker_set:
+                    return AnalysisResult(
+                        session_id=session_id,
+                        is_main_speaker=True,  # Assume main speaker is present
+                        similarity_score=1.0,
+                        is_anomaly=False,
+                        anomaly_type=AnomalyType.NONE,
+                        message="No speech detected - skipping analysis",
+                        audio_duration=duration,
+                    )
+                # Not in registration and no main speaker - prompt to start registration
                 return AnalysisResult(
                     session_id=session_id,
                     is_main_speaker=False,
                     similarity_score=0.0,
-                    is_anomaly=True,
+                    is_anomaly=False,
                     anomaly_type=AnomalyType.NO_SPEECH,
-                    message="No speech detected in audio",
+                    message="No speech detected. Start registration to enroll speaker.",
                     audio_duration=duration,
                 )
 
@@ -229,7 +266,7 @@ class AnomalyDetector:
                     f"Confidence: {audio_analysis.whisper_confidence:.2%}"
                 )
 
-            # Check if this is the first audio (main speaker registration)
+            # Check if main speaker is set (legacy flow - immediate registration)
             if not session.is_main_speaker_set:
                 return self._register_main_speaker(
                     session_id, embedding, duration, audio_analysis, anomalies
@@ -251,6 +288,152 @@ class AnomalyDetector:
                 message=f"Analysis failed: {str(e)}",
                 audio_duration=duration,
             )
+
+    def _handle_registration_phase(
+        self,
+        session_id: str,
+        audio: np.ndarray,
+        sample_rate: int,
+        duration: float,
+        audio_analysis: AudioAnalysis
+    ) -> AnalysisResult:
+        """
+        Handle audio during registration phase - accumulate speech segments.
+        
+        Only speech portions are accumulated toward the target duration.
+        When enough speech is collected, registration is completed.
+        """
+        session = self.session_manager.get_session(session_id)
+        if session is None:
+            return AnalysisResult(
+                session_id=session_id,
+                is_main_speaker=False,
+                similarity_score=0.0,
+                is_anomaly=True,
+                anomaly_type=AnomalyType.PROCESSING_ERROR,
+                message="Session not found",
+                audio_duration=duration,
+            )
+        
+        # Get current registration progress
+        progress_info = self.session_manager.get_registration_progress(session_id)
+        
+        # Log energy levels for debugging
+        logger.info(
+            f"Registration audio analysis - Energy: {audio_analysis.avg_energy:.4f}, "
+            f"Segments: {len(audio_analysis.speech_segments)}, "
+            f"Has speech: {audio_analysis.has_speech}"
+        )
+        
+        # Check for actual speech - require BOTH detected segments AND sufficient energy
+        # Typical speech RMS is 0.1-0.3, noise is usually below 0.03
+        MIN_REGISTRATION_ENERGY = 0.08  # Lowered from 0.08 to catch more speech
+        has_valid_speech = (
+            audio_analysis.has_speech 
+            and audio_analysis.speech_segments 
+            and audio_analysis.avg_energy >= MIN_REGISTRATION_ENERGY
+        )
+        
+        # Calculate speech duration from detected speech segments
+        speech_duration = 0.0
+        if has_valid_speech:
+            for start, end in audio_analysis.speech_segments:
+                speech_duration += (end - start)
+        
+        logger.info(
+            f"Valid speech check - Energy OK: {audio_analysis.avg_energy >= MIN_REGISTRATION_ENERGY}, "
+            f"Speech duration: {speech_duration:.2f}s"
+        )
+        
+        # If no valid speech in this chunk, return progress without adding
+        if speech_duration < 0.5:  # Require at least 500ms of clear speech per chunk
+            return AnalysisResult(
+                session_id=session_id,
+                is_main_speaker=False,
+                similarity_score=0.0,
+                is_anomaly=False,
+                anomaly_type=AnomalyType.REGISTRATION_IN_PROGRESS,
+                message=f"🎤 Speak clearly into the microphone... ({progress_info['speech_collected']:.1f}s / {progress_info['target_duration']:.0f}s)",
+                audio_duration=duration,
+                in_registration=True,
+                registration_progress=progress_info['progress'],
+                registration_speech_collected=progress_info['speech_collected'],
+                registration_target_duration=progress_info['target_duration'],
+                registration_complete=False,
+            )
+        
+        # Extract only speech portions from audio
+        processed_audio = self.audio_processor.preprocess_audio(audio)
+        
+        # Add speech to registration buffer
+        add_result = self.session_manager.add_registration_audio(
+            session_id, processed_audio, speech_duration
+        )
+        
+        if "error" in add_result:
+            return AnalysisResult(
+                session_id=session_id,
+                is_main_speaker=False,
+                similarity_score=0.0,
+                is_anomaly=True,
+                anomaly_type=AnomalyType.PROCESSING_ERROR,
+                message=add_result["error"],
+                audio_duration=duration,
+            )
+        
+        # Check if registration is complete
+        if add_result["complete"]:
+            # Get combined audio and extract embedding
+            combined_audio = self.session_manager.get_registration_audio(session_id)
+            if combined_audio is not None and len(combined_audio) > 0:
+                try:
+                    embedding = self.embedding_service.extract_embedding(combined_audio, sample_rate)
+                    success = self.session_manager.complete_registration(session_id, embedding)
+                    
+                    if success:
+                        logger.info(f"Registration completed for session {session_id}")
+                        return AnalysisResult(
+                            session_id=session_id,
+                            is_main_speaker=True,
+                            similarity_score=1.0,
+                            is_anomaly=False,
+                            anomaly_type=AnomalyType.NONE,
+                            message=f"✅ Main speaker registered! Collected {add_result['speech_collected']:.1f}s of speech. Ready for detection.",
+                            audio_duration=duration,
+                            is_first_audio=True,
+                            in_registration=False,
+                            registration_progress=1.0,
+                            registration_speech_collected=add_result['speech_collected'],
+                            registration_target_duration=add_result['target_duration'],
+                            registration_complete=True,
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to extract embedding from registration audio: {e}")
+                    return AnalysisResult(
+                        session_id=session_id,
+                        is_main_speaker=False,
+                        similarity_score=0.0,
+                        is_anomaly=True,
+                        anomaly_type=AnomalyType.PROCESSING_ERROR,
+                        message=f"Failed to register speaker: {str(e)}",
+                        audio_duration=duration,
+                    )
+        
+        # Registration still in progress
+        return AnalysisResult(
+            session_id=session_id,
+            is_main_speaker=False,
+            similarity_score=0.0,
+            is_anomaly=False,
+            anomaly_type=AnomalyType.REGISTRATION_IN_PROGRESS,
+            message=f"🎙️ Registering... {add_result['progress']:.0%} ({add_result['speech_collected']:.1f}s / {add_result['target_duration']:.0f}s)",
+            audio_duration=duration,
+            in_registration=True,
+            registration_progress=add_result['progress'],
+            registration_speech_collected=add_result['speech_collected'],
+            registration_target_duration=add_result['target_duration'],
+            registration_complete=False,
+        )
 
     def _register_main_speaker(
         self,
@@ -307,6 +490,29 @@ class AnomalyDetector:
         anomalies: List[str]
     ) -> AnalysisResult:
         """Compare audio embedding with the main speaker and check for all anomalies."""
+        
+        # Check if there's enough speech/energy to make a valid comparison
+        # Skip comparison ONLY for very low energy (silence) to avoid false alerts
+        # This should match or be slightly above the speech detection threshold
+        MIN_COMPARISON_ENERGY = 0.06  # Matched to speech detection threshold
+        
+        logger.info(
+            f"Comparison energy check - Energy: {audio_analysis.avg_energy:.4f}, "
+            f"Threshold: {MIN_COMPARISON_ENERGY}, Pass: {audio_analysis.avg_energy >= MIN_COMPARISON_ENERGY}"
+        )
+        
+        if audio_analysis.avg_energy < MIN_COMPARISON_ENERGY:
+            logger.info(f"Skipping comparison - pure silence detected")
+            return AnalysisResult(
+                session_id=session_id,
+                is_main_speaker=True,  # Assume main speaker when no speech
+                similarity_score=1.0,
+                is_anomaly=False,
+                anomaly_type=AnomalyType.NONE,
+                message="🔇 No speech detected - monitoring continues",
+                audio_duration=duration,
+            )
+        
         main_embedding = self.session_manager.get_main_speaker(session_id)
         
         if main_embedding is None:
